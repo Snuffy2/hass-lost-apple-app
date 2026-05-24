@@ -114,6 +114,19 @@ def test_dockerfile_starts_packaged_run_script() -> None:
     assert os.access(run_script, os.X_OK)
 
 
+def test_dockerfile_has_home_assistant_app_labels() -> None:
+    """Dockerfile should expose required Home Assistant App metadata labels."""
+    dockerfile = REPOSITORY_ROOT / "app" / "lost_apple" / "Dockerfile"
+
+    dockerfile_content = dockerfile.read_text(encoding="utf-8")
+
+    assert "ARG BUILD_VERSION" in dockerfile_content
+    assert 'io.hass.version="${BUILD_VERSION}"' in dockerfile_content
+    assert 'io.hass.type="app"' in dockerfile_content
+    assert 'io.hass.arch="aarch64|amd64"' in dockerfile_content
+    assert 'io.hass.version="VERSION"' not in dockerfile_content
+
+
 def test_app_config_uses_multi_arch_image_tag() -> None:
     """App config should point at the multi-platform GHCR image tag."""
     config_path = REPOSITORY_ROOT / "app" / "lost_apple" / "config.yaml"
@@ -214,6 +227,19 @@ def test_release_workflow_updates_runtime_and_app_config_versions() -> None:
     assert "DEFAULT_APP_VERSION" not in workflow_content
 
 
+def test_release_workflow_checks_build_version_before_docker_build() -> None:
+    """Release workflow should pass a skew-checked app version into Docker labels."""
+    workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
+
+    workflow_content = workflow_path.read_text(encoding="utf-8")
+
+    assert "id: app-version" in workflow_content
+    assert "--check" in workflow_content
+    assert "--github-output" in workflow_content
+    assert "BUILD_VERSION=${{ steps.app-version.outputs.version }}" in workflow_content
+    assert "build-args:" in workflow_content
+
+
 def test_release_version_script_updates_version_files(tmp_path: Path) -> None:
     """Release version script should update app config and runtime constant safely."""
     config_path = tmp_path / "config.yaml"
@@ -232,6 +258,19 @@ def test_release_version_script_updates_version_files(tmp_path: Path) -> None:
 
     assert "version: 1.2.3rc1\n" in config_path.read_text(encoding="utf-8")
     assert 'VERSION: Final = "1.2.3rc1"\n' in const_path.read_text(encoding="utf-8")
+
+
+def test_release_version_script_rejects_version_skew(tmp_path: Path) -> None:
+    """Release version script should reject mismatched app and runtime versions."""
+    config_path = tmp_path / "config.yaml"
+    const_path = tmp_path / "const.py"
+    config_path.write_text("name: Lost Apple\nversion: 1.2.3\n", encoding="utf-8")
+    const_path.write_text('from typing import Final\nVERSION: Final = "1.2.4"\n', encoding="utf-8")
+    release_version_script = _load_release_version_script()
+    assert_version_files_match = release_version_script.assert_version_files_match
+
+    with pytest.raises(ValueError, match="Version skew"):
+        assert_version_files_match(config_path=config_path, const_path=const_path)
 
 
 def test_build_app_uses_options_json_for_authentication(

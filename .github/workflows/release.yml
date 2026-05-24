@@ -46,6 +46,15 @@ jobs:
             exit 0
           fi
 
+      - name: Resolve app build version
+        id: app-version
+        run: |
+          python3 .github/scripts/update_release_version.py \
+            --check \
+            --config-path ./app/lost_apple/config.yaml \
+            --const-path ./app/src/lost_apple_app/const.py \
+            --github-output "${GITHUB_OUTPUT}"
+
       - name: Update Changelog
         if: ${{ github.event_name == 'release' && github.event.release.prerelease == false  }}
         uses: rhysd/changelog-from-release/action@v3
@@ -105,5 +114,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BUILD_VERSION=${{ steps.app-version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
