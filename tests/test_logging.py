@@ -77,3 +77,16 @@ def test_build_redacting_uvicorn_log_config_adds_filter_to_handlers() -> None:
     for handler in handlers.values():
         assert isinstance(handler, dict)
         assert "lost_apple_sensitive_data" in handler["filters"]
+
+
+def test_build_redacting_uvicorn_log_config_uses_second_precision_timestamps() -> None:
+    """Uvicorn log config should emit timestamps as yyyy-mm-dd hh:mm:ss."""
+    log_config = build_redacting_uvicorn_log_config()
+
+    formatters = log_config["formatters"]
+
+    assert isinstance(formatters, dict)
+    for formatter in formatters.values():
+        assert isinstance(formatter, dict)
+        assert formatter["datefmt"] == "%Y-%m-%d %H:%M:%S"
+        assert "%(asctime)s" in formatter["fmt"]

@@ -12,6 +12,7 @@ from urllib.parse import unquote_plus
 import uvicorn
 
 REDACTED_VALUE: Final = "<redacted>"
+LOG_DATE_FORMAT: Final = "%Y-%m-%d %H:%M:%S"
 SENSITIVE_QUERY_KEYS: Final = frozenset(
     {
         "access_token",
@@ -100,6 +101,15 @@ def build_redacting_uvicorn_log_config() -> dict[str, object]:
         A uvicorn logging configuration dictionary.
     """
     log_config = deepcopy(uvicorn.config.LOGGING_CONFIG)
+    formatters = log_config.get("formatters")
+    if isinstance(formatters, dict):
+        for formatter in formatters.values():
+            if isinstance(formatter, dict):
+                formatter["datefmt"] = LOG_DATE_FORMAT
+                log_format = formatter.get("fmt")
+                if isinstance(log_format, str) and "%(asctime)s" not in log_format:
+                    formatter["fmt"] = f"%(asctime)s {log_format}"
+
     filters = log_config.setdefault("filters", {})
     if isinstance(filters, dict):
         filters["lost_apple_sensitive_data"] = {
