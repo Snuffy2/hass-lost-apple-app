@@ -6,6 +6,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
+import plistlib
+import re
 from typing import TYPE_CHECKING, Protocol
 
 from findmy import AsyncAppleAccount, FindMyAccessory
@@ -14,7 +17,6 @@ from findmy.reports import LoginState
 if TYPE_CHECKING:
     from collections.abc import Awaitable
     from datetime import datetime
-    from pathlib import Path
 
 
 class _HashedPublicKey(Protocol):
@@ -37,6 +39,26 @@ class _RollingKeySource(Protocol):
 
 
 type _FindMySourceKey = _HashedPublicKey | _RollingKeySource
+type _NamedBytesPayload = tuple[str, bytes]
+
+_ALIGNMENT_FILENAME_SUFFIXES = (
+    ".key-alignment",
+    "_key_alignment",
+    "-key-alignment",
+    " key alignment",
+    ".alignment",
+    "_alignment",
+    "-alignment",
+    " alignment",
+)
+_ACCESSORY_MATCH_KEYS = (
+    "identifier",
+    "beaconIdentifier",
+    "beacon_identifier",
+    "stableIdentifier",
+    "serialNumber",
+    "name",
+)
 
 
 class _FindMyAccount(Protocol):
@@ -107,6 +129,16 @@ class FindMySource:
     name: str
     findmy_key_or_accessory: _FindMySourceKey
     battery_status: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _AccessoryPlistUpload:
+    """Parsed accessory plist upload with keys used for alignment matching."""
+
+    filename: str
+    payload: bytes
+    parsed: Mapping[str, object]
+    match_keys: frozenset[str]
 
 
 def normalize_findmy_device(raw_device: _FindMyRawDevice) -> FindMyDevice:
@@ -218,26 +250,37 @@ def build_sources_from_payloads(sources: Sequence[object]) -> list[FindMySource]
     findmy_sources: list[FindMySource] = []
     for index, payload in enumerate(sources):
         accessory = _load_accessory(payload)
-        source_identifier = accessory.identifier
-        if source_identifier is None:
-            source_identifier = accessory.serial_number
-        if source_identifier is None:
-            source_identifier = accessory.model
-        if source_identifier is None:
-            source_identifier = f"source-{index}"
+        findmy_sources.append(_source_from_accessory(accessory, index))
 
-        source_name = accessory.name
-        if source_name is None:
-            source_name = str(source_identifier)
+    return findmy_sources
 
-        findmy_sources.append(
-            FindMySource(
-                id=str(source_identifier),
-                name=source_name,
-                findmy_key_or_accessory=accessory,
-                battery_status=None,
-            )
+
+def build_sources_from_plist_payloads(
+    accessory_payloads: Sequence[_NamedBytesPayload],
+    alignment_payloads: Sequence[_NamedBytesPayload] | None = None,
+) -> list[FindMySource]:
+    """Build polling sources from accessory plist uploads and optional alignments."""
+    if not accessory_payloads:
+        missing_payloads_error = "accessory_payloads must be non-empty"
+        raise ValueError(missing_payloads_error)
+
+    accessories = [
+        _parse_accessory_plist(filename, payload) for filename, payload in accessory_payloads
+    ]
+    alignment_by_filename = _match_alignment_payloads(
+        accessories=accessories,
+        alignment_payloads=alignment_payloads or (),
+    )
+
+    findmy_sources: list[FindMySource] = []
+    for index, accessory_upload in enumerate(accessories):
+        alignment_payload = alignment_by_filename.get(accessory_upload.filename)
+        accessory = FindMyAccessory.from_plist(
+            accessory_upload.payload,
+            alignment_payload,
+            name=_accessory_display_name(accessory_upload),
         )
+        findmy_sources.append(_source_from_accessory(accessory, index))
 
     return findmy_sources
 
@@ -276,3 +319,147 @@ def _load_accessory(payload: object) -> FindMyAccessory:
 
     error = "Invalid accessory payload type"
     raise TypeError(error)
+
+
+def _source_from_accessory(accessory: FindMyAccessory, index: int) -> FindMySource:
+    """Create a project source from a loaded FindMy.py accessory."""
+    source_identifier = accessory.identifier
+    if source_identifier is None:
+        source_identifier = accessory.serial_number
+    if source_identifier is None:
+        source_identifier = accessory.model
+    if source_identifier is None:
+        source_identifier = f"source-{index}"
+
+    source_name = accessory.name
+    if source_name is None:
+        source_name = str(source_identifier)
+
+    return FindMySource(
+        id=str(source_identifier),
+        name=source_name,
+        findmy_key_or_accessory=accessory,
+        battery_status=None,
+    )
+
+
+def _parse_accessory_plist(filename: str, payload: bytes) -> _AccessoryPlistUpload:
+    """Parse an accessory plist and collect stable matching keys."""
+    parsed = _load_plist_mapping(payload)
+    match_keys = set(_matching_keys_from_mapping(parsed))
+    stem_key = _normalize_match_key(_strip_plist_suffix(filename))
+    if stem_key:
+        match_keys.add(stem_key)
+
+    return _AccessoryPlistUpload(
+        filename=filename,
+        payload=payload,
+        parsed=parsed,
+        match_keys=frozenset(match_keys),
+    )
+
+
+def _load_plist_mapping(payload: bytes) -> Mapping[str, object]:
+    """Load a plist payload and ensure the top-level value is a mapping."""
+    try:
+        parsed = plistlib.loads(payload)
+    except plistlib.InvalidFileException as error:
+        raise ValueError("Invalid plist payload") from error
+    if not isinstance(parsed, Mapping):
+        invalid_payload_error = "Plist payload must contain a mapping"
+        raise TypeError(invalid_payload_error)
+    return parsed
+
+
+def _matching_keys_from_mapping(payload: Mapping[str, object]) -> set[str]:
+    """Extract normalized identifiers that may connect accessory and alignment files."""
+    keys: set[str] = set()
+    for field in _ACCESSORY_MATCH_KEYS:
+        raw_value = payload.get(field)
+        if raw_value is None:
+            continue
+        normalized = _normalize_match_key(raw_value)
+        if normalized:
+            keys.add(normalized)
+    return keys
+
+
+def _match_alignment_payloads(
+    *,
+    accessories: Sequence[_AccessoryPlistUpload],
+    alignment_payloads: Sequence[_NamedBytesPayload],
+) -> dict[str, bytes]:
+    """Match uploaded key-alignment plists to accessory plists."""
+    match_index = _build_accessory_match_index(accessories)
+    matched_alignments: dict[str, bytes] = {}
+
+    for filename, payload in alignment_payloads:
+        parsed = _load_plist_mapping(payload)
+        display_name = _alignment_display_name(filename)
+        match_keys = _matching_keys_from_mapping(parsed)
+        fallback_key = _normalize_match_key(display_name)
+        if fallback_key:
+            match_keys.add(fallback_key)
+
+        matches = {
+            accessory.filename
+            for match_key in match_keys
+            for accessory in match_index.get(match_key, ())
+        }
+        if len(matches) != 1:
+            raise ValueError(
+                f"Alignment plist does not match an uploaded accessory: {display_name}"
+            )
+
+        accessory_filename = matches.pop()
+        if accessory_filename in matched_alignments:
+            raise ValueError(
+                f"Multiple alignment plists match uploaded accessory: {accessory_filename}"
+            )
+        matched_alignments[accessory_filename] = payload
+
+    return matched_alignments
+
+
+def _build_accessory_match_index(
+    accessories: Sequence[_AccessoryPlistUpload],
+) -> dict[str, tuple[_AccessoryPlistUpload, ...]]:
+    """Index uploaded accessory plists by all known alignment match keys."""
+    indexed: dict[str, list[_AccessoryPlistUpload]] = {}
+    for accessory in accessories:
+        for match_key in accessory.match_keys:
+            indexed.setdefault(match_key, []).append(accessory)
+    return {key: tuple(value) for key, value in indexed.items()}
+
+
+def _alignment_display_name(filename: str) -> str:
+    """Return a human-readable accessory name implied by an alignment filename."""
+    stem = _strip_plist_suffix(filename)
+    lowered = stem.casefold()
+    for suffix in _ALIGNMENT_FILENAME_SUFFIXES:
+        if lowered.endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem
+
+
+def _accessory_display_name(accessory_upload: _AccessoryPlistUpload) -> str | None:
+    """Return the uploaded accessory name if the plist or filename provides one."""
+    raw_name = accessory_upload.parsed.get("name")
+    if isinstance(raw_name, str) and raw_name:
+        return raw_name
+
+    filename_stem = _strip_plist_suffix(accessory_upload.filename)
+    return filename_stem or None
+
+
+def _strip_plist_suffix(filename: str) -> str:
+    """Return the basename without a trailing plist extension."""
+    basename = Path(filename).name
+    if basename.casefold().endswith(".plist"):
+        return basename[:-6]
+    return basename
+
+
+def _normalize_match_key(value: object) -> str:
+    """Normalize user-facing plist names and identifiers for matching."""
+    return re.sub(r"[^a-z0-9]+", "", str(value).casefold())

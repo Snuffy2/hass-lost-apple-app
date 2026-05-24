@@ -6,9 +6,9 @@ from __future__ import annotations
 
 from html import escape
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Annotated
 
-from fastapi import HTTPException, Request
+from fastapi import File, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, RedirectResponse
 from findmy import (
     AsyncAppleAccount,
@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 from lost_apple_app.auth import AuthState
 from lost_apple_app.findmy_client import (
     build_sources_from_payloads,
+    build_sources_from_plist_payloads,
     load_apple_account,
     serialize_accessory_payloads,
     serialize_apple_account_state,
@@ -64,6 +65,17 @@ class SourceImportRequest(BaseModel):
     """Payload for importing official Find My accessory JSON."""
 
     sources: list[object]
+
+
+async def _read_upload_payloads(files: list[UploadFile] | None) -> list[tuple[str, bytes]]:
+    """Read uploaded files into named byte payloads."""
+    if not files:
+        return []
+    payloads: list[tuple[str, bytes]] = []
+    for index, file in enumerate(files):
+        filename = file.filename or f"upload-{index}.plist"
+        payloads.append((filename, await file.read()))
+    return payloads
 
 
 def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C901
@@ -272,12 +284,32 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
     <h2>Find My source import</h2>
     <p>
       Official FindMy source discovery is not implemented yet.
-      Upload JSON payloads copied from Find My for Home Assistant integrations.
+      Upload JSON payloads copied from Find My for Home Assistant integrations,
+      or upload exported FindMy plist files.
     </p>
     <form id="source-import">
       <label for="sources">Sources JSON array</label>
       <textarea id="sources" rows="12" cols="80"></textarea>
       <button type="submit">Save sources</button>
+    </form>
+    <form id="plist-import">
+      <label for="accessory-plists">Accessory plist files</label>
+      <input
+        id="accessory-plists"
+        name="accessory_plists"
+        type="file"
+        accept=".plist,application/xml,text/xml"
+        multiple
+      />
+      <label for="alignment-plists">Key alignment plist files (optional)</label>
+      <input
+        id="alignment-plists"
+        name="alignment_plists"
+        type="file"
+        accept=".plist,application/xml,text/xml"
+        multiple
+      />
+      <button type="submit">Save plist sources</button>
     </form>
     <h3>Saved sources</h3>
     <div id="sources-status" class="status">No sources saved.</div>
@@ -308,6 +340,14 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
         "Authorization": `Bearer ${token}`,
         "Content-Type": "application/json",
       };
+    }
+
+    function authOnlyHeaders() {
+      const token = pairingToken.value;
+      if (!token) {
+        return {};
+      }
+      return {"Authorization": `Bearer ${token}`};
     }
 
     async function setStatus(target, payload) {
@@ -372,6 +412,29 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
         throw new Error(data.detail || "Request failed");
       }
       return response.json();
+    }
+
+    async function uploadPlists() {
+      const formData = new FormData();
+      for (const file of document.getElementById("accessory-plists").files) {
+        formData.append("accessory_plists", file);
+      }
+      for (const file of document.getElementById("alignment-plists").files) {
+        formData.append("alignment_plists", file);
+      }
+
+      const response = await fetch(setupUrl("sources/plist"), {
+        method: "POST",
+        headers: authOnlyHeaders(),
+        body: formData,
+      });
+      const payload = await response
+        .json()
+        .catch(() => ({"detail": "Request failed"}));
+      if (!response.ok) {
+        throw new Error(payload.detail || "Request failed");
+      }
+      return payload;
     }
 
     async function refreshMethods() {
@@ -447,6 +510,17 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
           document.getElementById("sources").value || "[]"
         );
         const payload = await postJson("sources", {sources});
+        await setStatus(sourcesStatus, payload);
+      } catch (error) {
+        await setStatus(sourcesStatus, { error: error.message });
+      }
+    });
+
+    document.getElementById("plist-import").addEventListener(
+      "submit", async (event) => {
+      event.preventDefault();
+      try {
+        const payload = await uploadPlists();
         await setStatus(sourcesStatus, payload);
       } catch (error) {
         await setStatus(sourcesStatus, { error: error.message });
@@ -633,6 +707,41 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
             raise HTTPException(
                 status_code=400,
                 detail="Invalid source payload",
+            ) from error
+
+        await storage.save_apple_sources(serialized)
+        return {
+            "source_count": len(sources),
+            "sources": [{"id": source.id, "name": source.name} for source in sources],
+        }
+
+    @app.post("/setup/sources/plist")
+    async def import_plist_sources(
+        accessory_plists: Annotated[list[UploadFile] | None, File()] = None,
+        alignment_plists: Annotated[list[UploadFile] | None, File()] = None,
+    ) -> dict[str, object]:
+        """Store uploaded Find My accessory plist payloads used for polling."""
+        accessory_payloads = await _read_upload_payloads(accessory_plists)
+        alignment_payloads = await _read_upload_payloads(alignment_plists)
+
+        if not accessory_payloads:
+            raise HTTPException(
+                status_code=400,
+                detail="accessory_plists payload must be non-empty",
+            )
+
+        try:
+            sources = build_sources_from_plist_payloads(
+                accessory_payloads=accessory_payloads,
+                alignment_payloads=alignment_payloads,
+            )
+            serialized = serialize_accessory_payloads(
+                [source.findmy_key_or_accessory for source in sources]
+            )
+        except (TypeError, ValueError) as error:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid plist source payload",
             ) from error
 
         await storage.save_apple_sources(serialized)

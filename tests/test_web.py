@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 import logging
+import plistlib
 from typing import TYPE_CHECKING
 
 from fastapi.testclient import TestClient
@@ -26,6 +28,37 @@ PAIRING_TOKEN = "test-token"
 VALID_USERNAME = "apple_user"
 VALID_PASSWORD = "apple_pass"
 SOURCE_PAYLOAD_COUNT = 2
+
+
+def _make_accessory_plist(
+    *,
+    identifier: str = "airtag-001",
+    name: str = "Keys",
+) -> bytes:
+    """Build a minimal FindMy.py-compatible accessory plist payload."""
+    return plistlib.dumps(
+        {
+            "privateKey": {"key": {"data": b"\x01" * 32}},
+            "sharedSecret": {"key": {"data": b"\x02" * 32}},
+            "secondarySharedSecret": {"key": {"data": b"\x03" * 32}},
+            "publicKey": b"\x04" * 65,
+            "identifier": identifier,
+            "model": "AirTag",
+            "pairingDate": datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            "name": name,
+            "emoji": "",
+        }
+    )
+
+
+def _make_alignment_plist() -> bytes:
+    """Build a minimal FindMy.py-compatible key-alignment plist payload."""
+    return plistlib.dumps(
+        {
+            "lastIndexObservationDate": datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+            "lastIndexObserved": 42,
+        }
+    )
 
 
 class Fake2faMethod:
@@ -134,6 +167,9 @@ async def test_setup_page_includes_configuration_sections(
         'postJson("2fa/request"',
         'postJson("2fa/submit"',
         'postJson("sources"',
+        'id="accessory-plists"',
+        'id="alignment-plists"',
+        "uploadPlists",
         'fetch(setupUrl("2fa/methods")',
         'id="two-factor-method"',
         "Select a 2FA method",
@@ -490,3 +526,64 @@ async def test_setup_sources_import_persists_payloads_with_patched_parsers(
         {"id": "airtag-001", "name": "Keys"},
         {"id": "airtag-002", "name": "Wallet"},
     ]
+
+
+@pytest.mark.anyio
+async def test_setup_plist_import_persists_accessory_payloads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plist import endpoint should persist serialized accessory payloads."""
+    app = await _make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    response = client.post(
+        "/setup/sources/plist",
+        headers=_setup_authorization_headers(),
+        files=[
+            ("accessory_plists", ("Keys.plist", _make_accessory_plist(), "application/xml")),
+            (
+                "alignment_plists",
+                ("Keys.alignment.plist", _make_alignment_plist(), "application/xml"),
+            ),
+        ],
+    )
+
+    assert response.status_code == HTTP_STATUS_OK
+    payload = response.json()
+    assert payload["source_count"] == 1
+    assert payload["sources"] == [{"id": "airtag-001", "name": "Keys"}]
+
+    storage = AppStorage(tmp_path / "lost_apple.sqlite3")
+    await storage.initialize()
+    sources = await storage.get_apple_sources()
+    assert sources is not None
+    first_source = sources[0]
+    assert isinstance(first_source, dict)
+    assert first_source["identifier"] == "airtag-001"
+    assert first_source["alignment_index"] == 42
+
+
+@pytest.mark.anyio
+async def test_setup_plist_import_rejects_unmatched_alignment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Plist import endpoint should reject ambiguous or unmatched alignment files."""
+    app = await _make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    response = client.post(
+        "/setup/sources/plist",
+        headers=_setup_authorization_headers(),
+        files=[
+            ("accessory_plists", ("Keys.plist", _make_accessory_plist(), "application/xml")),
+            (
+                "alignment_plists",
+                ("Wallet.alignment.plist", _make_alignment_plist(), "application/xml"),
+            ),
+        ],
+    )
+
+    assert response.status_code == HTTP_STATUS_BAD_REQUEST
+    assert response.json() == {"detail": "Invalid plist source payload"}

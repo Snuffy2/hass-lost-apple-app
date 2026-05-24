@@ -4,15 +4,19 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+import plistlib
 
 from lost_apple_app.findmy_client import (
     FindMyDevice,
     FindMyService,
     FindMySource,
+    build_sources_from_plist_payloads,
     normalize_findmy_device,
     normalize_findmy_report,
+    serialize_accessory_payloads,
     serialize_apple_account_state,
 )
+import pytest
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +76,41 @@ class FakeSerializableAccount:
             "type": "account",
             "account": {"username": "user@example.com", "password": "secret"},
         }
+
+
+def _make_accessory_plist(
+    *,
+    identifier: str = "airtag-001",
+    name: str = "Keys",
+    pairing_date: datetime = datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+) -> bytes:
+    """Build a minimal FindMy.py-compatible accessory plist payload."""
+    payload = {
+        "privateKey": {"key": {"data": b"\x01" * 32}},
+        "sharedSecret": {"key": {"data": b"\x02" * 32}},
+        "secondarySharedSecret": {"key": {"data": b"\x03" * 32}},
+        "publicKey": b"\x04" * 65,
+        "identifier": identifier,
+        "model": "AirTag",
+        "pairingDate": pairing_date,
+        "name": name,
+        "emoji": "",
+    }
+    return plistlib.dumps(payload)
+
+
+def _make_alignment_plist(
+    *,
+    index: int = 42,
+    observed_at: datetime = datetime(2026, 5, 2, 12, 0, tzinfo=UTC),
+) -> bytes:
+    """Build a minimal FindMy.py-compatible key-alignment plist payload."""
+    return plistlib.dumps(
+        {
+            "lastIndexObservationDate": observed_at,
+            "lastIndexObserved": index,
+        }
+    )
 
 
 def test_normalize_findmy_device() -> None:
@@ -179,3 +218,32 @@ def test_serialize_apple_account_state_drops_password() -> None:
     if state["account"] != {"username": "user@example.com", "password": None}:
         message = "Serialized account state should redact the Apple password"
         raise AssertionError(message)
+
+
+def test_build_sources_from_plist_payloads_pairs_alignment_by_filename() -> None:
+    """Accessory plist imports should pair matching alignment plists by file stem."""
+    sources = build_sources_from_plist_payloads(
+        accessory_payloads=[("Keys.plist", _make_accessory_plist())],
+        alignment_payloads=[("Keys.alignment.plist", _make_alignment_plist())],
+    )
+    serialized = serialize_accessory_payloads(
+        [source.findmy_key_or_accessory for source in sources]
+    )
+
+    assert len(sources) == 1
+    assert sources[0].id == "airtag-001"
+    assert sources[0].name == "Keys"
+    assert serialized[0]["alignment_index"] == 42
+    assert serialized[0]["alignment_date"] == "2026-05-02T12:00:00+00:00"
+
+
+def test_build_sources_from_plist_payloads_rejects_unmatched_alignment() -> None:
+    """Alignment plists should not be accepted when no accessory match is possible."""
+    with pytest.raises(
+        ValueError,
+        match="Alignment plist does not match an uploaded accessory: Wallet",
+    ):
+        build_sources_from_plist_payloads(
+            accessory_payloads=[("Keys.plist", _make_accessory_plist())],
+            alignment_payloads=[("Wallet.alignment.plist", _make_alignment_plist())],
+        )
