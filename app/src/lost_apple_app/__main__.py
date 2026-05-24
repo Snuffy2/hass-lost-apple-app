@@ -14,6 +14,7 @@ import uvicorn
 from lost_apple_app.api import create_app
 from lost_apple_app.auth import AuthState
 from lost_apple_app.config import resolve_pairing_token
+from lost_apple_app.const import VERSION
 from lost_apple_app.findmy_client import (
     FindMyService,
     build_sources_from_payloads,
@@ -27,7 +28,6 @@ if TYPE_CHECKING:
     from fastapi import FastAPI
 
 DEFAULT_DATABASE_PATH: Final = "/data/lost_apple.sqlite3"
-DEFAULT_APP_VERSION: Final = "0.1.0"
 
 
 def _resolve_database_path() -> Path:
@@ -38,7 +38,7 @@ def _resolve_database_path() -> Path:
 
 def _resolve_app_version() -> str:
     """Return the app version from env or default."""
-    return os.getenv("LOST_APPLE_APP_VERSION", DEFAULT_APP_VERSION)
+    return os.getenv("LOST_APPLE_APP_VERSION", VERSION)
 
 
 async def _build_service_for_polling(storage: AppStorage) -> FindMyService | None:

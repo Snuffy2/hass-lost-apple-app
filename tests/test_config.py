@@ -5,10 +5,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import tomllib
 
 from fastapi.testclient import TestClient
 from lost_apple_app.__main__ import build_app
 from lost_apple_app.config import resolve_pairing_token
+from lost_apple_app.const import VERSION
 import pytest
 
 AUTHORIZATION_HEADER = "Authorization"
@@ -142,6 +144,33 @@ def test_release_workflow_uses_event_specific_image_tags() -> None:
         "type=raw,value=latest,"
         "enable=${{ github.event_name == 'workflow_dispatch'" not in workflow_content
     )
+
+
+def test_project_version_uses_lost_apple_app_constant() -> None:
+    """Package metadata should resolve from the runtime version constant."""
+    pyproject_path = REPOSITORY_ROOT / "pyproject.toml"
+
+    pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+
+    assert pyproject["project"]["dynamic"] == ["version"]
+    assert "version" not in pyproject["project"]
+    assert pyproject["tool"]["setuptools"]["dynamic"]["version"] == {
+        "attr": "lost_apple_app.const.VERSION"
+    }
+    assert VERSION == "0.1.0"
+
+
+def test_release_workflow_updates_runtime_and_app_config_versions() -> None:
+    """Release workflow should rewrite both runtime and Home Assistant App versions."""
+    workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
+
+    workflow_content = workflow_path.read_text(encoding="utf-8")
+
+    assert 's/^VERSION: Final = \\".*\\"/VERSION: Final = \\"${RELEASE_TAG}\\"/' in workflow_content
+    assert "app/src/lost_apple_app/const.py" in workflow_content
+    assert "s/^version: .*/version: ${RELEASE_TAG}/" in workflow_content
+    assert "app/lost_apple/config.yaml" in workflow_content
+    assert "DEFAULT_APP_VERSION" not in workflow_content
 
 
 def test_build_app_uses_options_json_for_authentication(
