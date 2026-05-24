@@ -37,7 +37,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' }}
         run: |
           sed -i "s/^version: .*/version: ${RELEASE_TAG}/" ./app/lost_apple/config.yaml
-          sed -i "s/^DEFAULT_APP_VERSION: Final = \".*\"/DEFAULT_APP_VERSION: Final = \"${RELEASE_TAG}\"/" ./app/src/lost_apple_app/__main__.py
+          sed -i "s/^VERSION: Final = \".*\"/VERSION: Final = \"${RELEASE_TAG}\"/" ./app/src/lost_apple_app/const.py
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
@@ -74,7 +74,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            LOST_APPLE_VERSION=${{ env.RELEASE_TAG }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
