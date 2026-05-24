@@ -1,0 +1,171 @@
+[project]
+name = "hass-lost-apple-app"
+version = "0.1.0"
+description = "Home Assistant App for Apple Find My devices via FindMy.py"
+readme = "README.md"
+requires-python = ">=3.14"
+license = "GPL-3.0-or-later"
+authors = [{ name = "snuffy2" }]
+dependencies = [
+  "aiosqlite>=0.20.0",
+  "fastapi>=0.115.0",
+  "findmy>=0.10.0",
+  "pydantic>=2.10.0",
+  "uvicorn[standard]>=0.32.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "mypy>=1.15.0",
+  "prek",
+  "httpx>=0.28.0",
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.25.0",
+  "pytest-cov>=6.0.0",
+  "ruff>=0.9.0",
+  "pytest-timeout>=2.3.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["app/src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["app/src"]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = """
+  --quiet
+  --timeout=20
+  --durations=10
+  -o console_output_style=progress
+  --cov=app/src/lost_apple_app
+  --cov-fail-under=70
+  --cov-report=term-missing
+  --cov-report=html
+"""
+
+[tool.ruff]
+line-length = 100
+indent-width = 4
+fix = true
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "lf"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "ANN002",
+  "ANN003",
+  "ANN401",
+  "ARG",
+  "D203",
+  "D213",
+  "EM",
+  "ERA",
+  "FBT",
+  "PLC1901",
+  "PLR0904",
+  "PLR0911",
+  "PLR0912",
+  "PLR0913",
+  "PLR0914",
+  "PLR0915",
+  "PLR0916",
+  "PLR0917",
+  "PLR1702",
+  "PLR2004",
+  "PLW2901",
+  "PT011",
+  "PT018",
+  "RUF001",
+  "RUF002",
+  "RUF003",
+  "RUF015",
+  "S311",
+  "SIM103",
+  "SIM108",
+  "SIM115",
+  "TC001",
+  "TC002",
+  "TC003",
+  "TD003",
+  "TRY003",
+  "TRY301",
+  "TRY400",
+
+  # May conflict with the formatter.
+  "COM812",
+  "COM819",
+  "D206",
+  "D300",
+  "E111",
+  "E114",
+  "E117",
+  "Q000",
+  "Q001",
+  "Q002",
+  "Q003",
+  "Q004",
+  "W191",
+]
+fixable = ["ALL"]
+
+[tool.ruff.lint.flake8-pytest-style]
+fixture-parentheses = false
+
+[tool.ruff.lint.isort]
+force-sort-within-sections = true
+known-third-party = ["fastapi", "findmy", "pydantic", "pytest"]
+combine-as-imports = true
+split-on-trailing-comma = false
+
+[tool.ruff.lint.mccabe]
+max-complexity = 25
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = [
+  "B017",
+  "C90",
+  "E501",
+  "S101",
+  "S105",
+  "S108",
+  "SLF001",
+]
+"app/src/lost_apple_app/models.py" = ["TC003"]
+
+[tool.codespell]
+ignore-words-list = "hass"
+
+[tool.mypy]
+python_version = "3.14"
+files = ["app/src/lost_apple_app", "tests"]
+mypy_path = ["app/src"]
+check_untyped_defs = true
+explicit_package_bases = true
+namespace_packages = true
+pretty = true
+show_error_codes = true
+warn_unused_configs = true
+
+[[tool.mypy.overrides]]
+module = ["findmy.*"]
+ignore_missing_imports = true
+
+[tool.coverage.run]
+branch = true
+source = ["app/src/lost_apple_app"]
+relative_files = true
+parallel = false
+
+[tool.coverage.report]
+show_missing = true
