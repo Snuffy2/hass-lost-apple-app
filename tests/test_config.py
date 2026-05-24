@@ -188,6 +188,9 @@ def test_release_workflow_updates_runtime_and_app_config_versions() -> None:
     assert "types: [published]" in workflow_content
     assert "if: ${{ github.event_name == 'release' }}" in workflow_content
     assert 'APP_VERSION="${RELEASE_TAG#v}"' in workflow_content
+    assert "grep -Eq" in workflow_content
+    assert 'printf "%s\\n" "${APP_VERSION}"' in workflow_content
+    assert "Invalid release version" in workflow_content
     assert 's/^VERSION: Final = \\".*\\"/VERSION: Final = \\"${APP_VERSION}\\"/' in workflow_content
     assert "app/src/lost_apple_app/const.py" in workflow_content
     assert "s/^version: .*/version: ${APP_VERSION}/" in workflow_content
