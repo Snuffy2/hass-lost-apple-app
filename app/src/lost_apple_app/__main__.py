@@ -20,6 +20,7 @@ from lost_apple_app.findmy_client import (
     build_sources_from_payloads,
     load_apple_account,
 )
+from lost_apple_app.logging import build_redacting_uvicorn_log_config
 from lost_apple_app.polling import PollingScheduler
 from lost_apple_app.storage import AppStorage
 from lost_apple_app.web import register_web_routes
@@ -105,6 +106,7 @@ def main() -> None:
         host="0.0.0.0",  # noqa: S104
         port=8099,
         factory=True,
+        log_config=build_redacting_uvicorn_log_config(),
     )
 
 
