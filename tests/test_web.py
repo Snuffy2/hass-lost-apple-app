@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 from fastapi.testclient import TestClient
@@ -134,8 +135,72 @@ async def test_setup_page_includes_configuration_sections(
         'postJson("2fa/submit"',
         'postJson("sources"',
         'fetch(setupUrl("2fa/methods")',
+        'id="two-factor-method"',
+        "Select a 2FA method",
     ):
         assert fragment in body
+
+
+@pytest.mark.anyio
+async def test_setup_page_uses_single_labeled_two_factor_method_dropdown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2FA controls should use one method-label dropdown instead of duplicate indexes."""
+    app = await _make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    response = client.get("/setup")
+
+    assert response.status_code == HTTP_STATUS_OK
+    assert response.text.count('id="two-factor-method"') == 1
+    assert 'for="two-factor-method">2FA method' in response.text
+    assert "Method index" not in response.text
+    assert 'id="request-method-index"' not in response.text
+    assert 'id="submit-method-index"' not in response.text
+    assert "renderMethods(payload.methods || [])" in response.text
+    assert "methodList.length === 1" in response.text
+
+
+@pytest.mark.anyio
+async def test_setup_page_contains_executable_javascript(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Setup page JavaScript should not contain Python-template brace escapes."""
+    app = await _make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    response = client.get("/setup")
+
+    assert response.status_code == HTTP_STATUS_OK
+    assert "function setupUrl(path) {" in response.text
+    assert "{{" not in response.text
+    assert "}}" not in response.text
+
+
+@pytest.mark.anyio
+async def test_setup_get_with_login_fields_reports_javascript_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Fallback GET form submissions should surface a clear UI and log warning."""
+    app = await _make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    with caplog.at_level(logging.WARNING, logger="uvicorn.error"):
+        response = client.get(
+            "/setup",
+            params={"username": VALID_USERNAME, "password": VALID_PASSWORD},
+        )
+
+    assert response.status_code == HTTP_STATUS_OK
+    assert "Login form submitted as GET" in response.text
+    assert VALID_PASSWORD not in response.text
+    assert "Setup login form submitted as GET" in caplog.text
+    assert VALID_USERNAME in caplog.text
+    assert VALID_PASSWORD not in caplog.text
 
 
 @pytest.mark.anyio
@@ -309,6 +374,49 @@ async def test_submit_two_factor_authentication_completes_login(
     assert session is not None
     assert session["account"] == {"username": VALID_USERNAME, "password": None}
     assert account.close_calls == 1
+
+
+@pytest.mark.anyio
+async def test_repeated_two_factor_submit_reports_already_authenticated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Submitting a code after successful auth should explain that auth is complete."""
+    account = FakeAppleAccount(
+        login_state=LoginState.REQUIRE_2FA,
+        methods=[Fake2faMethod(code_return_state=LoginState.AUTHENTICATED)],
+    )
+    monkeypatch.setattr(
+        "lost_apple_app.web.AsyncAppleAccount",
+        lambda _provider: account,
+    )
+    app = await _make_app(tmp_path, monkeypatch)
+    client = TestClient(app)
+
+    login_response = client.post(
+        "/setup/login",
+        headers=_setup_authorization_headers(),
+        json={"username": VALID_USERNAME, "password": VALID_PASSWORD},
+    )
+    assert login_response.status_code == HTTP_STATUS_OK
+
+    submit_payload = {"method_index": 0, "code": "123456"}
+    first_submit_response = client.post(
+        "/setup/2fa/submit",
+        headers=_setup_authorization_headers(),
+        json=submit_payload,
+    )
+    second_submit_response = client.post(
+        "/setup/2fa/submit",
+        headers=_setup_authorization_headers(),
+        json=submit_payload,
+    )
+
+    assert first_submit_response.status_code == HTTP_STATUS_OK
+    assert second_submit_response.status_code == 409
+    assert second_submit_response.json() == {
+        "detail": "Apple 2FA is already complete. The account is authenticated."
+    }
 
 
 @pytest.mark.anyio

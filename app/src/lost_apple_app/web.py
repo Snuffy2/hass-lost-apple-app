@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+from html import escape
+import logging
 from typing import TYPE_CHECKING
 
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from findmy import (
     AsyncAppleAccount,
@@ -36,6 +38,7 @@ HACS_INSTALL_URL = (
     "https://my.home-assistant.io/redirect/hacs_repository/"
     "?owner=snuffy2&repository=hass-lost-apple-integration&category=integration"
 )
+_LOGGER = logging.getLogger("uvicorn.error")
 
 
 class LoginRequest(BaseModel):
@@ -133,14 +136,23 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
     async def _get_pending_account() -> AsyncAppleAccount:
         """Return the in-memory account currently waiting for 2FA."""
         if pending_account is None:
+            if await storage.get_account_state() == AuthState.AUTHENTICATED:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Apple 2FA is already complete. The account is authenticated.",
+                )
             raise HTTPException(
                 status_code=409,
                 detail="Apple 2FA session is missing. Start with /setup/login first.",
             )
         return pending_account
 
-    def _build_setup_page() -> str:
+    def _build_setup_page(alert: str | None = None) -> str:
         """Build setup page HTML for guided Apple login and source import."""
+        alert_html = ""
+        if alert:
+            alert_html = f'<div id="setup-alert" class="alert">{escape(alert)}</div>'
+
         return """
 <!doctype html>
 <html lang="en">
@@ -193,6 +205,15 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
       min-height: 96px;
     }
 
+    .alert {
+      border: 1px solid #b45309;
+      border-radius: 6px;
+      background: #fffbeb;
+      color: #78350f;
+      margin: 12px 0;
+      padding: 10px 12px;
+    }
+
     button {
       padding: 6px 10px;
     }
@@ -207,6 +228,7 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
   <p>
     <a href="{hacs_url}" target="_blank" rel="noopener">Install through HACS</a>
   </p>
+  {setup_alert}
 
   <section>
     <h2>Setup access</h2>
@@ -230,29 +252,17 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
   <section>
     <h2>Two-factor authentication</h2>
     <button id="refresh-2fa" type="button">Refresh available methods</button>
+    <label for="two-factor-method">2FA method</label>
+    <select id="two-factor-method">
+      <option value="">Select a 2FA method</option>
+    </select>
     <form id="request-2fa">
-      <label for="request-method-index">Method index</label>
-      <input
-        id="request-method-index"
-        name="method_index"
-        type="number"
-        value="0"
-        min="0"
-      />
-      <button type="submit">Request code</button>
+      <button id="request-code" type="submit">Request code</button>
     </form>
     <form id="submit-2fa">
-      <label for="submit-method-index">Method index</label>
-      <input
-        id="submit-method-index"
-        name="method_index"
-        type="number"
-        value="0"
-        min="0"
-      />
       <label for="code">Code</label>
       <input id="code" name="code" type="text" autocomplete="one-time-code" />
-      <button type="submit">Submit code</button>
+      <button id="submit-code" type="submit">Submit code</button>
     </form>
     <h3>Available methods</h3>
     <div id="methods" class="status">No methods loaded.</div>
@@ -275,124 +285,185 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
 
   <script>
     const authStatus = document.getElementById("auth-status");
+    const methodSelect = document.getElementById("two-factor-method");
     const methods = document.getElementById("methods");
     const pairingToken = document.getElementById("pairing-token");
+    const requestCodeButton = document.getElementById("request-code");
     const sourcesStatus = document.getElementById("sources-status");
+    const submitCodeButton = document.getElementById("submit-code");
 
-    function setupUrl(path) {{
+    function setupUrl(path) {
       const basePath = window.location.pathname.endsWith("/")
         ? window.location.pathname
-        : `${{window.location.pathname}}/`;
-      return `${{basePath}}${{path}}`;
-    }}
+        : `${window.location.pathname}/`;
+      return `${basePath}${path}`;
+    }
 
-    function authHeaders() {{
+    function authHeaders() {
       const token = pairingToken.value;
-      if (!token) {{
-        return {{"Content-Type": "application/json"}};
-      }}
-      return {{
-        "Authorization": `Bearer ${{token}}`,
+      if (!token) {
+        return {"Content-Type": "application/json"};
+      }
+      return {
+        "Authorization": `Bearer ${token}`,
         "Content-Type": "application/json",
-      }};
-    }}
+      };
+    }
 
-    async function setStatus(target, payload) {{
+    async function setStatus(target, payload) {
       target.textContent = JSON.stringify(payload, null, 2);
-    }}
+    }
 
-    async function postJson(path, body) {{
-      const response = await fetch(setupUrl(path), {{
+    function renderMethods(methodList) {
+      methodSelect.replaceChildren();
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = "Select a 2FA method";
+      methodSelect.appendChild(placeholder);
+
+      for (const method of methodList) {
+        const option = document.createElement("option");
+        option.value = String(method.index);
+        option.textContent = `${method.label} (${method.type})`;
+        methodSelect.appendChild(option);
+      }
+
+      const hasMethods = methodList.length > 0;
+      if (methodList.length === 1) {
+        methodSelect.value = String(methodList[0].index);
+      }
+      requestCodeButton.disabled = !hasMethods;
+      submitCodeButton.disabled = !hasMethods;
+      methods.textContent = hasMethods
+        ? JSON.stringify(methodList, null, 2)
+        : "No methods loaded.";
+    }
+
+    function selectedMethodIndex() {
+      if (methodSelect.value === "") {
+        throw new Error("Select a 2FA method first.");
+      }
+      return Number(methodSelect.value);
+    }
+
+    function updateAuthStatus(action, payload) {
+      const lines = [action];
+      if (payload.account_state === "authenticated") {
+        lines.push("Apple account authenticated.");
+        requestCodeButton.disabled = true;
+        submitCodeButton.disabled = true;
+      } else if (payload.state) {
+        lines.push(`Apple login state: ${payload.state}`);
+      }
+      lines.push(JSON.stringify(payload, null, 2));
+      authStatus.textContent = lines.join("\\n\\n");
+    }
+
+    async function postJson(path, body) {
+      const response = await fetch(setupUrl(path), {
         method: "POST",
         headers: authHeaders(),
         body: JSON.stringify(body),
-      }});
-      if (!response.ok) {{
+      });
+      if (!response.ok) {
         const data = await response.json().catch(
-          () => ({{"detail": "Request failed"}})
+          () => ({"detail": "Request failed"})
         );
         throw new Error(data.detail || "Request failed");
-      }}
+      }
       return response.json();
-    }}
+    }
 
-    async function refreshMethods() {{
-      const response = await fetch(setupUrl("2fa/methods"), {{
+    async function refreshMethods() {
+      const response = await fetch(setupUrl("2fa/methods"), {
         headers: authHeaders(),
-      }});
+      });
       const payload = await response
         .json()
-        .catch(() => ({{"detail": "Request failed"}}));
-      if (!response.ok) {{
+        .catch(() => ({"detail": "Request failed"}));
+      if (!response.ok) {
         methods.textContent = JSON.stringify(payload, null, 2);
         return;
-      }}
-      methods.textContent = JSON.stringify(payload, null, 2);
-    }}
+      }
+      renderMethods(payload.methods || []);
+    }
 
-    document.getElementById("login-form").addEventListener("submit", async (event) => {{
+    document.getElementById("login-form").addEventListener("submit", async (event) => {
       event.preventDefault();
-      try {{
+      try {
+        await setStatus(authStatus, {status: "Starting Apple login..."});
+        renderMethods([]);
         const username = document.getElementById("username").value;
         const password = document.getElementById("password").value;
-        const payload = await postJson("login", {{username, password}});
-        await setStatus(authStatus, payload);
-        await refreshMethods();
-      }} catch (error) {{
-        await setStatus(authStatus, {{ error: error.message }});
-      }}
-    }});
+        const payload = await postJson("login", {username, password});
+        renderMethods(payload.methods || []);
+        updateAuthStatus("Apple login response received.", payload);
+      } catch (error) {
+        await setStatus(authStatus, { error: error.message });
+      }
+    });
 
     document.getElementById("request-2fa").addEventListener(
-      "submit", async (event) => {{
+      "submit", async (event) => {
       event.preventDefault();
-      try {{
-        const method_index = Number(
-          document.getElementById("request-method-index").value
-        );
-        const payload = await postJson("2fa/request", {{method_index}});
-        await setStatus(authStatus, payload);
-      }} catch (error) {{
-        await setStatus(authStatus, {{ error: error.message }});
-      }}
-    }});
+      try {
+        const method_index = selectedMethodIndex();
+        requestCodeButton.disabled = true;
+        await setStatus(authStatus, {status: "Requesting 2FA code..."});
+        const payload = await postJson("2fa/request", {method_index});
+        updateAuthStatus("2FA code requested.", payload);
+      } catch (error) {
+        await setStatus(authStatus, { error: error.message });
+      } finally {
+        if (methodSelect.value !== "") {
+          requestCodeButton.disabled = false;
+        }
+      }
+    });
 
     document.getElementById("submit-2fa").addEventListener(
-      "submit", async (event) => {{
+      "submit", async (event) => {
       event.preventDefault();
-      try {{
-        const method_index = Number(
-          document.getElementById("submit-method-index").value
-        );
+      try {
+        const method_index = selectedMethodIndex();
         const code = document.getElementById("code").value;
-        const payload = await postJson("2fa/submit", {{method_index, code}});
-        await setStatus(authStatus, payload);
-      }} catch (error) {{
-        await setStatus(authStatus, {{ error: error.message }});
-      }}
-    }});
+        submitCodeButton.disabled = true;
+        await setStatus(authStatus, {status: "Submitting 2FA code..."});
+        const payload = await postJson("2fa/submit", {method_index, code});
+        updateAuthStatus("2FA code accepted.", payload);
+      } catch (error) {
+        await setStatus(authStatus, { error: error.message });
+        if (methodSelect.value !== "") {
+          submitCodeButton.disabled = false;
+        }
+      }
+    });
 
     document.getElementById("source-import").addEventListener(
-      "submit", async (event) => {{
+      "submit", async (event) => {
       event.preventDefault();
-      try {{
+      try {
         const sources = JSON.parse(
           document.getElementById("sources").value || "[]"
         );
-        const payload = await postJson("sources", {{sources}});
+        const payload = await postJson("sources", {sources});
         await setStatus(sourcesStatus, payload);
-      }} catch (error) {{
-        await setStatus(sourcesStatus, {{ error: error.message }});
-      }}
-    }});
+      } catch (error) {
+        await setStatus(sourcesStatus, { error: error.message });
+      }
+    });
 
     document.getElementById("refresh-2fa").addEventListener("click", refreshMethods);
+    renderMethods([]);
   </script>
 </body>
 </html>
 """.replace(
             "{hacs_url}",
             HACS_INSTALL_URL,
+        ).replace(
+            "{setup_alert}",
+            alert_html,
         )
 
     @app.get("/", include_in_schema=False)
@@ -401,18 +472,37 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
         return RedirectResponse(url="setup")
 
     @app.get("/setup", response_class=HTMLResponse)
-    async def setup() -> str:
+    async def setup(request: Request) -> str:
         """Return setup page used for account and source configuration."""
-        return _build_setup_page()
+        alert: str | None = None
+        if "username" in request.query_params or "password" in request.query_params:
+            username = request.query_params.get("username", "<missing>")
+            _LOGGER.warning(
+                "Setup login form submitted as GET for username=%s; "
+                "JavaScript submit handling may not have loaded",
+                username,
+            )
+            alert = (
+                "Login form submitted as GET instead of using the setup API. "
+                "Reload this page and try again. If this remains visible, the setup "
+                "JavaScript did not load correctly."
+            )
+        return _build_setup_page(alert)
 
     @app.post("/setup/login")
     async def login(payload: LoginRequest) -> dict[str, object]:
         """Start Apple login and persist partial auth state."""
         account = AsyncAppleAccount(LocalAnisetteProvider())
+        _LOGGER.info("Starting Apple login for username=%s", payload.username)
         try:
             login_state = await account.login(payload.username, payload.password)
         except (InvalidCredentialsError, UnauthorizedError) as error:
             await account.close()
+            _LOGGER.warning(
+                "Apple login failed for username=%s: %s",
+                payload.username,
+                type(error).__name__,
+            )
             raise HTTPException(status_code=401, detail="Apple login failed") from error
 
         await _persist_account_state(account)
@@ -427,6 +517,13 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
             await _clear_pending_account()
             await account.close()
 
+        _LOGGER.info(
+            "Apple login completed for username=%s state=%s account_state=%s two_factor_methods=%d",
+            payload.username,
+            _serialize_state(login_state),
+            str(await storage.get_account_state()),
+            len(methods),
+        )
         return {
             "state": _serialize_state(login_state),
             "account_state": str(await storage.get_account_state()),
@@ -460,8 +557,14 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
             raise HTTPException(status_code=400, detail="Invalid method index")
 
         method = methods[payload.method_index]
+        _LOGGER.info("Requesting Apple 2FA code using method_index=%d", payload.method_index)
         await method.request()
         await _persist_account_state(account)
+        _LOGGER.info(
+            "Apple 2FA code requested state=%s account_state=%s",
+            _serialize_state(account.login_state),
+            str(await storage.get_account_state()),
+        )
         return {
             "state": _serialize_state(account.login_state),
             "account_state": str(await storage.get_account_state()),
@@ -477,11 +580,17 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
             raise HTTPException(status_code=400, detail="Invalid method index")
 
         method = methods[payload.method_index]
+        _LOGGER.info("Submitting Apple 2FA code using method_index=%d", payload.method_index)
         try:
             login_state = await method.submit(payload.code)
         except InvalidStateError as error:
             await storage.set_account_state(AuthState.REAUTH_REQUIRED)
             await _clear_pending_account()
+            _LOGGER.warning(
+                "Apple 2FA submit failed method_index=%d: %s",
+                payload.method_index,
+                type(error).__name__,
+            )
             raise HTTPException(status_code=409, detail="2FA submit failed") from error
 
         if login_state in (LoginState.AUTHENTICATED, LoginState.LOGGED_IN):
@@ -493,6 +602,11 @@ def register_web_routes(app: FastAPI, storage: AppStorage) -> None:  # noqa: C90
             await storage.set_account_state(AuthState.REAUTH_REQUIRED)
             await _clear_pending_account()
 
+        _LOGGER.info(
+            "Apple 2FA submit completed state=%s account_state=%s",
+            _serialize_state(login_state),
+            str(await storage.get_account_state()),
+        )
         return {
             "state": _serialize_state(login_state),
             "account_state": str(await storage.get_account_state()),
