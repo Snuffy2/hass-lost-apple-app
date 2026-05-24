@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import tomllib
+from types import ModuleType
 
 from fastapi.testclient import TestClient
 from lost_apple_app.__main__ import build_app
@@ -44,6 +47,17 @@ def _assert_status(response_status: int, expected_status: int) -> None:
             "Unexpected status code: " + str(response_status) + ", expected " + str(expected_status)
         )
         raise AssertionError(status_error)
+
+
+def _load_release_version_script() -> ModuleType:
+    """Load the release version update script as a Python module."""
+    script_path = REPOSITORY_ROOT / ".github" / "scripts" / "update_release_version.py"
+    spec = importlib.util.spec_from_file_location("update_release_version", script_path)
+    if spec is None or spec.loader is None:
+        raise AssertionError("Unable to load release version update script")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_resolve_pairing_token_prefers_env_override(
@@ -188,15 +202,36 @@ def test_release_workflow_updates_runtime_and_app_config_versions() -> None:
     assert "types: [published]" in workflow_content
     assert "if: ${{ github.event_name == 'release' }}" in workflow_content
     assert 'APP_VERSION="${RELEASE_TAG#v}"' in workflow_content
-    assert "grep -Eq" in workflow_content
-    assert 'printf "%s\\n" "${APP_VERSION}"' in workflow_content
-    assert "Invalid release version" in workflow_content
-    assert 's/^VERSION: Final = \\".*\\"/VERSION: Final = \\"${APP_VERSION}\\"/' in workflow_content
+    assert "python3 .github/scripts/update_release_version.py" in workflow_content
+    assert "sed -i" not in workflow_content
     assert "app/src/lost_apple_app/const.py" in workflow_content
-    assert "s/^version: .*/version: ${APP_VERSION}/" in workflow_content
     assert "app/lost_apple/config.yaml" in workflow_content
-    assert "git push origin HEAD:${{ github.event.repository.default_branch }}" in workflow_content
+    assert "uses: stefanzweifel/git-auto-commit-action@v7" in workflow_content
+    assert "branch: ${{ github.event.repository.default_branch }}" in workflow_content
+    assert (
+        "git push origin HEAD:${{ github.event.repository.default_branch }}" not in workflow_content
+    )
     assert "DEFAULT_APP_VERSION" not in workflow_content
+
+
+def test_release_version_script_updates_version_files(tmp_path: Path) -> None:
+    """Release version script should update app config and runtime constant safely."""
+    config_path = tmp_path / "config.yaml"
+    const_path = tmp_path / "const.py"
+    shutil.copy(REPOSITORY_ROOT / "app" / "lost_apple" / "config.yaml", config_path)
+    shutil.copy(REPOSITORY_ROOT / "app" / "src" / "lost_apple_app" / "const.py", const_path)
+
+    release_version_script = _load_release_version_script()
+    update_version_files = release_version_script.update_version_files
+
+    update_version_files(
+        config_path=config_path,
+        const_path=const_path,
+        version="1.2.3rc1",
+    )
+
+    assert "version: 1.2.3rc1\n" in config_path.read_text(encoding="utf-8")
+    assert 'VERSION: Final = "1.2.3rc1"\n' in const_path.read_text(encoding="utf-8")
 
 
 def test_build_app_uses_options_json_for_authentication(
