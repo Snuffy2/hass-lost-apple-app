@@ -9,12 +9,13 @@
 | app/src/lost\_apple\_app/api.py            |       43 |        3 |       14 |        1 |     89% |     70-73 |
 | app/src/lost\_apple\_app/auth.py           |       11 |        0 |        2 |        0 |    100% |           |
 | app/src/lost\_apple\_app/config.py         |       41 |        8 |       12 |        3 |     79% |19-21, 23-24, 32-33, 61 |
+| app/src/lost\_apple\_app/const.py          |        3 |        0 |        0 |        0 |    100% |           |
 | app/src/lost\_apple\_app/findmy\_client.py |      114 |       46 |       38 |        3 |     51% |165-170, 185, 191, 200-\>202, 210-213, 218-242, 247-255, 260-264, 269-278 |
 | app/src/lost\_apple\_app/models.py         |       23 |        0 |        0 |        0 |    100% |           |
 | app/src/lost\_apple\_app/polling.py        |       52 |        4 |        8 |        2 |     90% |72, 79, 103-104 |
 | app/src/lost\_apple\_app/storage.py        |       97 |        2 |       16 |        2 |     96% |   86, 104 |
 | app/src/lost\_apple\_app/web.py            |      134 |       31 |       24 |        7 |     75% |80-81, 102, 108, 121-128, 136, 414-416, 439-447, 460, 477, 482-485, 492-494, 518-519 |
-| **TOTAL**                                  |  **574** |   **99** |  **124** |   **22** | **78%** |           |
+| **TOTAL**                                  |  **577** |   **99** |  **124** |   **22** | **78%** |           |
 
 
 ## Setup coverage badge
