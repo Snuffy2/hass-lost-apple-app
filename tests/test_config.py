@@ -213,6 +213,10 @@ def test_release_workflow_updates_runtime_and_app_config_versions() -> None:
     workflow_content = workflow_path.read_text(encoding="utf-8")
 
     assert "types: [published]" in workflow_content
+    assert (
+        "ref: ${{ github.event_name == 'release' && "
+        "github.event.repository.default_branch || github.ref }}"
+    ) in workflow_content
     assert "if: ${{ github.event_name == 'release' }}" in workflow_content
     assert 'APP_VERSION="${RELEASE_TAG#v}"' in workflow_content
     assert "python3 .github/scripts/update_release_version.py" in workflow_content
@@ -220,7 +224,9 @@ def test_release_workflow_updates_runtime_and_app_config_versions() -> None:
     assert "app/src/lost_apple_app/const.py" in workflow_content
     assert "app/lost_apple/config.yaml" in workflow_content
     assert "uses: stefanzweifel/git-auto-commit-action@v7" in workflow_content
+    assert "id: version-commit" in workflow_content
     assert "branch: ${{ github.event.repository.default_branch }}" in workflow_content
+    assert "steps.version-commit.outputs.changes_detected == 'true'" in workflow_content
     assert (
         "git push origin HEAD:${{ github.event.repository.default_branch }}" not in workflow_content
     )
