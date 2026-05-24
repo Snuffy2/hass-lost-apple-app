@@ -33,11 +33,21 @@ jobs:
         with:
           ref: ${{ github.event_name == 'release' && github.event.release.target_commitish || github.ref }}
 
-      - name: Update checked-out version files for image build
-        if: ${{ github.event_name == 'workflow_dispatch' || github.event_name == 'release' }}
+      - name: Update and commit release version files
+        if: ${{ github.event_name == 'release' }}
         run: |
-          sed -i "s/^version: .*/version: ${RELEASE_TAG}/" ./app/lost_apple/config.yaml
-          sed -i "s/^VERSION: Final = \".*\"/VERSION: Final = \"${RELEASE_TAG}\"/" ./app/src/lost_apple_app/const.py
+          APP_VERSION="${RELEASE_TAG#v}"
+          sed -i "s/^version: .*/version: ${APP_VERSION}/" ./app/lost_apple/config.yaml
+          sed -i "s/^VERSION: Final = \".*\"/VERSION: Final = \"${APP_VERSION}\"/" ./app/src/lost_apple_app/const.py
+          if git diff --quiet -- ./app/lost_apple/config.yaml ./app/src/lost_apple_app/const.py; then
+            echo "Version files already match ${APP_VERSION}."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add ./app/lost_apple/config.yaml ./app/src/lost_apple_app/const.py
+          git commit -m "chore: update app version to ${APP_VERSION} [skip ci]"
+          git push origin HEAD:${{ github.event.repository.default_branch }}
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4

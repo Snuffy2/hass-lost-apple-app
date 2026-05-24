@@ -110,6 +110,16 @@ def test_app_config_uses_multi_arch_image_tag() -> None:
     assert "hass-lost-apple-{arch}" not in config_content
 
 
+def test_app_config_version_matches_runtime_version() -> None:
+    """Home Assistant App config should publish the same version as the runtime."""
+    config_path = REPOSITORY_ROOT / "app" / "lost_apple" / "config.yaml"
+
+    config_content = config_path.read_text(encoding="utf-8")
+
+    assert f"version: {VERSION}\n" in config_content
+    assert VERSION == "0.1.2"
+
+
 def test_release_workflow_publishes_single_multi_platform_image() -> None:
     """Release workflow should publish one image name with a multi-platform manifest."""
     workflow_path = REPOSITORY_ROOT / ".github" / "workflows" / "release.yml"
@@ -157,7 +167,7 @@ def test_project_version_uses_lost_apple_app_constant() -> None:
     assert pyproject["tool"]["setuptools"]["dynamic"]["version"] == {
         "attr": "lost_apple_app.const.VERSION"
     }
-    assert VERSION == "0.1.0"
+    assert VERSION == "0.1.2"
 
 
 def test_release_workflow_updates_runtime_and_app_config_versions() -> None:
@@ -166,10 +176,13 @@ def test_release_workflow_updates_runtime_and_app_config_versions() -> None:
 
     workflow_content = workflow_path.read_text(encoding="utf-8")
 
-    assert 's/^VERSION: Final = \\".*\\"/VERSION: Final = \\"${RELEASE_TAG}\\"/' in workflow_content
+    assert "if: ${{ github.event_name == 'release' }}" in workflow_content
+    assert 'APP_VERSION="${RELEASE_TAG#v}"' in workflow_content
+    assert 's/^VERSION: Final = \\".*\\"/VERSION: Final = \\"${APP_VERSION}\\"/' in workflow_content
     assert "app/src/lost_apple_app/const.py" in workflow_content
-    assert "s/^version: .*/version: ${RELEASE_TAG}/" in workflow_content
+    assert "s/^version: .*/version: ${APP_VERSION}/" in workflow_content
     assert "app/lost_apple/config.yaml" in workflow_content
+    assert "git push origin HEAD:${{ github.event.repository.default_branch }}" in workflow_content
     assert "DEFAULT_APP_VERSION" not in workflow_content
 
 
