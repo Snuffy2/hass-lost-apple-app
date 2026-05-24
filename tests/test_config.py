@@ -117,7 +117,6 @@ def test_app_config_version_matches_runtime_version() -> None:
     config_content = config_path.read_text(encoding="utf-8")
 
     assert f"version: {VERSION}\n" in config_content
-    assert VERSION == "0.1.2"
 
 
 def test_release_workflow_publishes_single_multi_platform_image() -> None:
@@ -154,6 +153,17 @@ def test_release_workflow_uses_event_specific_image_tags() -> None:
         "type=raw,value=latest,"
         "enable=${{ github.event_name == 'workflow_dispatch'" not in workflow_content
     )
+    assert "description: Image tag only; does not update app version" in workflow_content
+
+
+def test_config_tests_do_not_pin_current_release_version() -> None:
+    """Config tests should keep working after release automation bumps VERSION."""
+    test_path = REPOSITORY_ROOT / "tests" / "test_config.py"
+
+    test_content = test_path.read_text(encoding="utf-8")
+    pinned_version_assertion = "assert " + "VERSION == " + '"'
+
+    assert pinned_version_assertion not in test_content
 
 
 def test_project_version_uses_lost_apple_app_constant() -> None:
@@ -167,7 +177,6 @@ def test_project_version_uses_lost_apple_app_constant() -> None:
     assert pyproject["tool"]["setuptools"]["dynamic"]["version"] == {
         "attr": "lost_apple_app.const.VERSION"
     }
-    assert VERSION == "0.1.2"
 
 
 def test_release_workflow_updates_runtime_and_app_config_versions() -> None:
@@ -176,6 +185,7 @@ def test_release_workflow_updates_runtime_and_app_config_versions() -> None:
 
     workflow_content = workflow_path.read_text(encoding="utf-8")
 
+    assert "types: [published]" in workflow_content
     assert "if: ${{ github.event_name == 'release' }}" in workflow_content
     assert 'APP_VERSION="${RELEASE_TAG#v}"' in workflow_content
     assert 's/^VERSION: Final = \\".*\\"/VERSION: Final = \\"${APP_VERSION}\\"/' in workflow_content

@@ -7,11 +7,11 @@ on:
   workflow_dispatch:
     inputs:
       tag_name:
-        description: Image tag to publish
+        description: Image tag only; does not update app version
         required: true
         type: string
   release:
-    types: [published, edited]
+    types: [published]
 
 permissions:
   contents: write
